@@ -1,0 +1,12 @@
+# E1 reference: per-snapshot Louvain on the same Birth-Death subsample.
+name: e1_birthdeath_louvain
+method: louvain
+graph_seed: 1
+algo_seed: 1
+tracker_threshold: 0.3
+event_tolerance: 1
+event_min_overlap: 0.5
+data:
+  source: birthdeath
+  path: external/DyG-MF/Dirth-Death
+  n_communities: 6
