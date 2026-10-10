@@ -1,0 +1,21 @@
+# Smoke test: tiny planted sequence with every event kind, per-snapshot Louvain.
+name: e0_smoke
+method: louvain
+graph_seed: 1
+algo_seed: 1
+tracker_threshold: 0.3
+event_tolerance: 1
+event_min_overlap: 0.5
+checkpoint_every: 0
+data:
+  n_communities: 6
+  community_size: 30
+  n_snapshots: 8
+  p_in: 0.3
+  p_out: 0.01
+  move_fraction: 0.02
+  events:
+    - {t: 2, kind: birth}
+    - {t: 3, kind: merge}
+    - {t: 5, kind: split}
+    - {t: 6, kind: death}

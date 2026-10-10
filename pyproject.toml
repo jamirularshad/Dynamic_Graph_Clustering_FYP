@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dgc"
+version = "0.1.0"
+description = "Resource-aware online dynamic graph clustering (FYP CCDS26-0526)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "networkx>=3.3",
+    "scikit-learn>=1.5",
+    "pandas>=2.2",
+    "pyarrow>=16",
+    "pyyaml>=6.0",
+    "matplotlib>=3.9",
+    "threadpoolctl>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "pyright>=1.1.380", "pre-commit>=3.7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["external"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
