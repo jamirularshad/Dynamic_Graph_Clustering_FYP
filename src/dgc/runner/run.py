@@ -8,21 +8,21 @@ import argparse
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from dgc.data.stream import OnlineStream, lifecycle
-from dgc.data.synthetic import generate
 from dgc.data.types import CommunityEvent, EvalAnnotations, GraphSnapshot, Partition
-from dgc.methods.base import OnlineClusterer
+from dgc.methods.base import OnlineClusterer, StepResult
+from dgc.methods.lookahead import LookaheadAdapter
 from dgc.metrics import partition as pm
 from dgc.metrics.accounting import step_accounting
 from dgc.metrics.events import match_events
 from dgc.runner import checkpoint as ckpt
-from dgc.runner.config import RunConfig, build_method, load_config
+from dgc.runner.config import RunConfig, build_data, build_method, load_config
 from dgc.runner.manifest import build_manifest, dataset_hash
 from dgc.tracking.tracker import Tracker
 
@@ -71,16 +71,7 @@ def run_sequence(
     for snap in OnlineStream(snapshots):
         if resume is not None and snap.t <= resume.t:
             continue
-        result = method.step(snap)
-        events, identities = tracker.step(snap.t, result.labels)
-
-        row: dict[str, Any] = {"t": snap.t}
-        row |= step_accounting(result, len(snap.nodes), len(lifecycle(prev, snap).arrived))
-        row |= _quality(snap, result.labels, annotations.labels.get(snap.t))
-        out.rows.append(row)
-        out.predictions[snap.t] = result.labels
-        out.identities[snap.t] = identities
-        out.events.extend(events)
+        _record(out, tracker, snap, prev, method.step(snap), annotations, available_at=snap.t)
         prev = snap
 
         is_last = snap.t == snapshots[-1].t or snap.t == stop_after
@@ -101,6 +92,45 @@ def run_sequence(
         if snap.t == stop_after:
             break
     return out
+
+
+def run_lookahead_sequence(
+    adapter: LookaheadAdapter,
+    tracker: Tracker,
+    snapshots: list[GraphSnapshot],
+    annotations: EvalAnnotations,
+) -> SequenceOutput:
+    """Like `run_sequence` for a method that needs t+1; rows record `available_at`."""
+    out = SequenceOutput(rows=[], predictions={}, identities={}, events=[])
+    prev: GraphSnapshot | None = None
+    outputs = [adapter.step(snap) for snap in OnlineStream(snapshots)] + [adapter.finish()]
+    for delayed in outputs:
+        if delayed is None:
+            continue
+        snap = delayed.snapshot
+        _record(out, tracker, snap, prev, delayed.result, annotations, delayed.available_at)
+        prev = snap
+    return out
+
+
+def _record(
+    out: SequenceOutput,
+    tracker: Tracker,
+    snap: GraphSnapshot,
+    prev: GraphSnapshot | None,
+    result: StepResult,
+    annotations: EvalAnnotations,
+    available_at: int,
+) -> None:
+    """Track, evaluate and store one step's output."""
+    events, identities = tracker.step(snap.t, result.labels)
+    row: dict[str, Any] = {"t": snap.t, "available_at": available_at}
+    row |= step_accounting(result, len(snap.nodes), len(lifecycle(prev, snap).arrived))
+    row |= _quality(snap, result.labels, annotations.labels.get(snap.t))
+    out.rows.append(row)
+    out.predictions[snap.t] = result.labels
+    out.identities[snap.t] = identities
+    out.events.extend(events)
 
 
 def _quality(snap: GraphSnapshot, pred: Partition, true: Partition | None) -> dict[str, float]:
@@ -138,26 +168,43 @@ def summarise(config: RunConfig, out: SequenceOutput, annotations: EvalAnnotatio
     }
 
 
-def run(config_path: Path, out_root: Path, resume_path: Path | None = None) -> Path:
+def run(
+    config_path: Path,
+    out_root: Path,
+    resume_path: Path | None = None,
+    graph_seed: int | None = None,
+    algo_seed: int | None = None,
+) -> Path:
+    """Run one config; seed overrides replace the config's seeds and are recorded."""
     config = load_config(config_path)
-    snapshots, annotations = generate(config.data, seed=config.graph_seed)
+    if graph_seed is not None:
+        config = replace(config, graph_seed=graph_seed)
+    if algo_seed is not None:
+        config = replace(config, algo_seed=algo_seed)
+    snapshots, annotations = build_data(config)
     data_hash = dataset_hash(snapshots, annotations)
     manifest = build_manifest(config.resolved(), data_hash)
     run_dir = out_root / config.name / manifest["run_id"]
     run_dir.mkdir(parents=True)
 
-    resume = ckpt.load(resume_path) if resume_path else None
+    method = build_method(config, annotations)
+    tracker = Tracker(config.tracker_threshold)
     manifest["resumed_from"] = str(resume_path) if resume_path else None
-    out = run_sequence(
-        build_method(config),
-        Tracker(config.tracker_threshold),
-        snapshots,
-        annotations,
-        data_hash=data_hash,
-        on_checkpoint=lambda c: ckpt.save(run_dir / "checkpoint.pkl", c),
-        checkpoint_every=config.checkpoint_every,
-        resume=resume,
-    )
+    if isinstance(method, LookaheadAdapter):
+        if resume_path:
+            raise ValueError("lookahead runs do not support resuming")
+        out = run_lookahead_sequence(method, tracker, snapshots, annotations)
+    else:
+        out = run_sequence(
+            method,
+            tracker,
+            snapshots,
+            annotations,
+            data_hash=data_hash,
+            on_checkpoint=lambda c: ckpt.save(run_dir / "checkpoint.pkl", c),
+            checkpoint_every=config.checkpoint_every,
+            resume=ckpt.load(resume_path) if resume_path else None,
+        )
 
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     pd.DataFrame(out.rows).to_csv(run_dir / "per_snapshot.csv", index=False)
@@ -190,8 +237,10 @@ def main() -> None:
     parser.add_argument("config", type=Path)
     parser.add_argument("--out", type=Path, default=Path("results"))
     parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--graph-seed", type=int, default=None)
+    parser.add_argument("--algo-seed", type=int, default=None)
     args = parser.parse_args()
-    print(run(args.config, args.out, args.resume))
+    print(run(args.config, args.out, args.resume, args.graph_seed, args.algo_seed))
 
 
 if __name__ == "__main__":

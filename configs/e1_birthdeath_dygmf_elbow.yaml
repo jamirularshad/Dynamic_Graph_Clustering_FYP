@@ -1,0 +1,22 @@
+# E1 pilot: DyG-MF reimplementation (published lookahead), k_mode=elbow, on a seeded
+# 6-community induced subsample of the repo's Birth-Death instance (design log E3).
+name: e1_birthdeath_dygmf_elbow
+method: dygmf_lookahead
+graph_seed: 1
+algo_seed: 1
+tracker_threshold: 0.3
+event_tolerance: 1
+event_min_overlap: 0.5
+method_params:
+  k_mode: elbow
+  r: 20
+  landmark_fraction: 0.5
+  mu: 0.16
+  lam: 0.2
+  beta: 20.0
+  s: 1
+  n_iter: 100
+data:
+  source: birthdeath
+  path: external/DyG-MF/Dirth-Death
+  n_communities: 6
