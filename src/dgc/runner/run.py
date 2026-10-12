@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 from dgc.data.stream import OnlineStream, lifecycle
 from dgc.data.types import CommunityEvent, EvalAnnotations, GraphSnapshot, Partition
@@ -22,7 +23,7 @@ from dgc.metrics import partition as pm
 from dgc.metrics.accounting import step_accounting
 from dgc.metrics.events import match_events
 from dgc.runner import checkpoint as ckpt
-from dgc.runner.config import RunConfig, build_data, build_method, load_config
+from dgc.runner.config import RunConfig, build_data, build_method, load_config, validate
 from dgc.runner.manifest import build_manifest, dataset_hash
 from dgc.tracking.tracker import Tracker
 
@@ -127,6 +128,7 @@ def _record(
     row: dict[str, Any] = {"t": snap.t, "available_at": available_at}
     row |= step_accounting(result, len(snap.nodes), len(lifecycle(prev, snap).arrived))
     row |= _quality(snap, result.labels, annotations.labels.get(snap.t))
+    row |= _selection(result, annotations.labels.get(snap.t - 1), annotations.labels.get(snap.t))
     out.rows.append(row)
     out.predictions[snap.t] = result.labels
     out.identities[snap.t] = identities
@@ -148,17 +150,48 @@ def _quality(snap: GraphSnapshot, pred: Partition, true: Partition | None) -> di
     return row
 
 
+def _selection(
+    result: StepResult, before: Partition | None, after: Partition | None
+) -> dict[str, float]:
+    """Changed-node diagnostic: score-selected nodes against nodes whose reference
+    community changed between t-1 and t. A diagnostic only: useful updates can include
+    neighbours whose labels did not change."""
+    if not result.selected or before is None or after is None:
+        return {}
+    changed = {n for n in after if n in before and before[n] != after[n]}
+    hits = len(result.selected & changed)
+    precision = hits / len(result.selected)
+    recall = hits / len(changed) if changed else float("nan")
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if changed and precision + recall > 0
+        else (0.0 if changed else float("nan"))
+    )
+    return {
+        "n_changed": len(changed),
+        "sel_precision": precision,
+        "sel_recall": recall,
+        "sel_f1": f1,
+    }
+
+
 def _mean(rows: list[dict[str, Any]], key: str) -> float:
     """Mean of `key` over rows, skipping NaN (undefined per-snapshot values)."""
-    values = [r[key] for r in rows if not math.isnan(r[key])]
+    values = [r[key] for r in rows if key in r and not math.isnan(r[key])]
     return sum(values) / len(values) if values else float("nan")
 
 
 def summarise(config: RunConfig, out: SequenceOutput, annotations: EvalAnnotations) -> dict:
     """Run-level aggregates: per-snapshot means first, then event scores per kind."""
-    metrics = [c for c in ("nmi", "ari", "nf1", "modularity", "conductance") if c in out.rows[0]]
+    metric_names = ("nmi", "ari", "nf1", "modularity", "conductance")
+    metric_names += ("sel_precision", "sel_recall", "sel_f1")
+    metrics = [c for c in metric_names if any(c in r for r in out.rows)]
     scores = match_events(
-        out.events, annotations.events, config.event_tolerance, config.event_min_overlap
+        out.events,
+        annotations.events,
+        config.event_tolerance,
+        config.event_min_overlap,
+        available_at={r["t"]: r["available_at"] for r in out.rows},
     )
     return {
         "snapshot_means": {c: _mean(out.rows, c) for c in metrics},
@@ -174,29 +207,44 @@ def run(
     resume_path: Path | None = None,
     graph_seed: int | None = None,
     algo_seed: int | None = None,
+    method: str | None = None,
+    params: dict[str, Any] | None = None,
+    name: str | None = None,
+    clear_params: bool = False,
 ) -> Path:
-    """Run one config; seed overrides replace the config's seeds and are recorded."""
+    """Run one config. Overrides replace the config's seeds, method and run name;
+    `params` are merged into the method parameters, after dropping the config's own
+    when `clear_params` is set. The manifest records the resolved result."""
     config = load_config(config_path)
     if graph_seed is not None:
         config = replace(config, graph_seed=graph_seed)
     if algo_seed is not None:
         config = replace(config, algo_seed=algo_seed)
+    if method is not None:
+        config = replace(config, method=method)
+    if clear_params:
+        config = replace(config, method_params={})
+    if params:
+        config = replace(config, method_params=config.method_params | params)
+    if name is not None:
+        config = replace(config, name=name)
+    validate(config)
     snapshots, annotations = build_data(config)
     data_hash = dataset_hash(snapshots, annotations)
     manifest = build_manifest(config.resolved(), data_hash)
     run_dir = out_root / config.name / manifest["run_id"]
     run_dir.mkdir(parents=True)
 
-    method = build_method(config, annotations)
+    clusterer = build_method(config, annotations)
     tracker = Tracker(config.tracker_threshold)
     manifest["resumed_from"] = str(resume_path) if resume_path else None
-    if isinstance(method, LookaheadAdapter):
+    if isinstance(clusterer, LookaheadAdapter):
         if resume_path:
             raise ValueError("lookahead runs do not support resuming")
-        out = run_lookahead_sequence(method, tracker, snapshots, annotations)
+        out = run_lookahead_sequence(clusterer, tracker, snapshots, annotations)
     else:
         out = run_sequence(
-            method,
+            clusterer,
             tracker,
             snapshots,
             annotations,
@@ -239,8 +287,30 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--graph-seed", type=int, default=None)
     parser.add_argument("--algo-seed", type=int, default=None)
+    parser.add_argument("--method", default=None)
+    parser.add_argument("--name", default=None)
+    parser.add_argument("--clear-params", action="store_true", help="drop the config's params")
+    parser.add_argument(
+        "--param", action="append", default=[], metavar="KEY=VALUE", help="method parameter"
+    )
     args = parser.parse_args()
-    print(run(args.config, args.out, args.resume, args.graph_seed, args.algo_seed))
+    params = {}
+    for item in args.param:
+        key, _, value = item.partition("=")
+        params[key] = yaml.safe_load(value)
+    print(
+        run(
+            args.config,
+            args.out,
+            args.resume,
+            args.graph_seed,
+            args.algo_seed,
+            args.method,
+            params,
+            args.name,
+            args.clear_params,
+        )
+    )
 
 
 if __name__ == "__main__":

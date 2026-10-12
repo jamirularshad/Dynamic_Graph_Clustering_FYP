@@ -17,3 +17,28 @@ Status key: **checked** means confirmed from the paper or code; **verify** means
 **Chosen (Week 2, 2026-10-11):** warm-start Louvain. It will be implemented and run in Week 7 (E8), since nothing needs it before then (YAGNI).
 
 **Original recommendation:** warm-start Louvain as the primary temporal baseline, because it is causal, fits our interface and is cheap to reproduce. Evolutionary spectral clustering would be a second choice if Kelly wants a smoothness-based method. Δ-screening and DF Louvain are the closest related work for the literature comparison (report §15, Chapter 2) whether or not they are run.
+
+
+## Contribution review (end of Week 3, 2026-10-12)
+
+**Limitation demonstrated so far (E1–E3 pilots):**
+- DyG-MF's selective updating depends on next-snapshot information (Eq. 14 uses t+1, and §4.4 states that the method takes G_{t−1}, G_t and G_{t+1}).
+- Its change score selects changed nodes barely better than random under gradual change (recall 0.19 vs 0.17).
+- With a fixed budget, frozen embeddings drift after structural events (Week 2 planted pilot).
+
+**Intervention so far:**
+- Causal operation, which costs no measured quality and cuts operational delay from about 1.25 to about 0.1 snapshots.
+- The corrected community-profile score, which recovers all changed nodes under gradual change and nearly matches full updating at about a third of the updates.
+
+**How this differs from the closest work (to verify against sources when writing Chapter 2):**
+- jLMDC (Li et al., 2023) also splits nodes into dynamic and static groups by topology. Our profile score instead measures change *relative to the previous partition*, not raw topology.
+- Δ-screening and DF Louvain select affected vertices from the edge batch, within modularity methods. Our setting is an incremental factorisation method, with explicit accounting and an evaluation of causal delay.
+
+**Not yet shown, and the remaining contribution:**
+- Budgets that respond to how much the graph changed (E4).
+- Cost-aware allocation (E5).
+- Drift control by refresh (E6).
+
+The current fixed μ = 0.16 is a weakness of both DyG-MF and our causal variants, which motivates Weeks 4–6.
+
+**Framing risk:** per-snapshot Louvain beats DyG-MF on the planted graphs. Contribution claims must compare selection policies inside the incremental method (with full updating as the reference), and E8 must check real data.

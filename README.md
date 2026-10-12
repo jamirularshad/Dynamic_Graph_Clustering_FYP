@@ -10,7 +10,8 @@ The project studies how an online clustering method should choose which nodes to
 |---|---|---|
 | 1 | Data types, synthetic generator, metrics, tracker, runner, DyG-MF source audit | Done |
 | 2 | DyG-MF reimplementation, lookahead adapter, Birth-Death loader, E1 pilot | Done |
-| 3 | Causal change estimators (E2, E3) | Next |
+| 3 | Causal change estimators, causal DyG-MF, E2/E3 pilots | Done |
+| 4 | Adaptive update budgets (E4) | Next |
 
 The full eight-week plan and the experiments (E1–E9) are described in the FYP report; decisions and findings are in `docs/design_log.md`.
 
@@ -36,7 +37,7 @@ git clone https://github.com/Clearloveyuan/DyG-MF.git external/DyG-MF
 .venv/bin/python -m dgc.runner.run configs/e0_smoke.yaml --resume results/.../checkpoint.pkl
 ```
 
-Seed overrides replace the config's seeds and are recorded in the manifest. Each run directory holds:
+Overrides (`--graph-seed`, `--algo-seed`, `--method`, `--param KEY=VALUE`, `--name`, `--clear-params`) are recorded in the manifest. `scripts/run_e2_e3.sh` runs the E2/E3 grid and `scripts/summarise_runs.py PREFIX` rebuilds its tables from saved runs. Each run directory holds:
 
 - `manifest.json`: run ID, code commit, DyG-MF commit, resolved config, dependency versions, thread settings, dataset hash, seeds and hardware
 - `per_snapshot.csv`: quality (NMI, ARI, NF1, modularity, conductance), update accounting, timings and `available_at`
@@ -52,12 +53,14 @@ Seed overrides replace the config's seeds and are recorded in the manifest. Each
 | `e1_birthdeath_dygmf_elbow.yaml` | As above, number of clusters chosen by the elbow method |
 | `e1_birthdeath_dygmf_oracle_full.yaml` | As the oracle config, but every node updated (μ = 1) |
 | `e1_birthdeath_louvain.yaml` | Per-snapshot Louvain on the same subsample |
+| `e2e3_gradual.yaml`, `e2e3_abrupt.yaml` | Planted graphs (10 × 40 nodes, 20% mixing) with gradual drift or merge/split/birth/death events; scorer and method set by `scripts/run_e2_e3.sh` |
 
 ## Methods
 
 - **Louvain per snapshot** (`methods/louvain.py`): clusters every snapshot from scratch; the "update everything" reference.
 - **DyG-MF** (`methods/dygmf.py`): reimplemented from the paper and the released code. The released code cannot run as published, so the code and parameters are used where they work, and each defect has a documented fix: NetMF PMI with a two-step window, the corrected landmark-centre update (Eq. 7), and a fixed embedding width r = 20 with a k-means read-out. See `docs/design_log.md` (audit F1–F10, P1–P12, spec D1–D9).
 - **Lookahead adapter** (`methods/lookahead.py`): runs methods that need snapshot t+1, recording when each output actually became available.
+- **Causal DyG-MF** (`CausalDyGMF` in `methods/dygmf.py`): never sees t+1; the dynamic nodes are chosen by a causal score from `methods/scores.py` (one-step, EWMA, community profile, combined or random). The community-profile score was selected on validation data for the next experiments.
 
 ## Checks
 

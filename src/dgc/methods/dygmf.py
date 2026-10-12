@@ -19,9 +19,11 @@ import numpy as np
 from sklearn.cluster import KMeans, kmeans_plusplus
 
 from dgc.data.types import GraphSnapshot
+from dgc.methods import scores as sc
 from dgc.methods.base import StepResult
 
 EPS = 1e-10
+SCORERS = ("eq14", "one_step", "ewma", "profile", "combined", "random")
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class DyGMFConfig:
 
     `r` is a fixed embedding width and should bound every k_t (default k_max); the
     paper's r = 1000 is not used because the read-out needs r close to k.
+    `scorer` picks the dynamic-node score: "eq14" is the paper's (it uses t+1 when the
+    lookahead adapter supplies it); the others are causal estimators from `scores`.
     """
 
     r: int = 20
@@ -44,6 +48,12 @@ class DyGMFConfig:
     k_min: int = 2
     k_max: int = 20
     kmeans_iter: int = 100
+    scorer: str = "eq14"
+    ewma_gamma: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.scorer not in SCORERS:
+            raise ValueError(f"unknown scorer {self.scorer!r}; known: {list(SCORERS)}")
 
 
 @dataclass
@@ -240,6 +250,8 @@ class DyGMFCore:
         self.emb: dict[int, np.ndarray] = {}
         self.phi: dict[int, np.ndarray] = {}
         self.psi: dict[int, np.ndarray] = {}
+        self.labels: dict[int, int] = {}
+        self.history: np.ndarray | None = None
 
     def _seed(self) -> int:
         return int(self.rng.integers(2**31 - 1))
@@ -281,9 +293,9 @@ class DyGMFCore:
 
         tick = time.perf_counter()
         if self.prev is None:
-            dynamic = np.ones(n, dtype=bool)
+            dynamic, selected = np.ones(n, dtype=bool), np.zeros(n, dtype=bool)
         else:
-            dynamic = self._dynamic_mask(frame, nxt)
+            dynamic, selected = self._dynamic_mask(frame, nxt)
         timings["score"] = time.perf_counter() - tick
 
         tick = time.perf_counter()
@@ -294,35 +306,64 @@ class DyGMFCore:
         km = kmeans(min(frame.k, n), 10, self._seed())
         labels = {ids[i]: int(c) for i, c in enumerate(km.fit_predict(emb))}
         timings["readout"] = time.perf_counter() - tick
+        # History is updated only after the output for t exists.
         self.emb = {ids[i]: emb[i] for i in range(n)}
         self.phi, self.psi = phi_rows, psi_cols
+        if self.history is None or self.prev is None:
+            self.history = frame.adj.copy()
+        else:
+            aligned = reindex(self.history, self.prev.nodes, frame.nodes)
+            self.history = sc.ewma_update(aligned, frame.adj, self.cfg.ewma_gamma)
+        self.labels = labels
         self.prev = frame
         return StepResult(
             labels=labels,
             updated_nodes=frozenset(ids[i] for i in np.flatnonzero(updated)),
             timings=timings,
+            selected=frozenset(ids[i] for i in np.flatnonzero(selected)),
         )
 
-    def _dynamic_mask(self, frame: _Frame, nxt: GraphSnapshot | None) -> np.ndarray:
-        """Top ceil(mu*n) nodes by Eq. 14, plus every node without a stored embedding."""
-        prev = self.prev
-        assert prev is not None
+    def _dynamic_mask(
+        self, frame: _Frame, nxt: GraphSnapshot | None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Dynamic nodes: every node without a stored embedding (mandatory) plus the
+        top ceil(mu*n) others by the configured score (returned as `selected`)."""
+        scores = self._scores(frame, nxt)
         nodes = frame.nodes
-        w_rows = [reindex(prev.adj, prev.nodes, nodes), frame.adj]
-        centres = [reindex(prev.centres, prev.nodes, nodes, rows=False), frame.centres]
-        if nxt is not None:
-            self.ahead = self._frame(nxt, frame)
-            w_rows.append(reindex(self.ahead.adj, self.ahead.nodes, nodes))
-            centres.append(reindex(self.ahead.centres, self.ahead.nodes, nodes, rows=False))
-        scores = eq14_scores(w_rows, centres, current=1)
-
         mandatory = np.array([int(x) not in self.emb for x in nodes])
-        dynamic = mandatory.copy()
+        selected = np.zeros(len(nodes), dtype=bool)
         budget = int(np.ceil(self.cfg.mu * len(nodes)))
         order = np.lexsort((nodes, -scores))
-        candidates = [i for i in order if not mandatory[i]][:budget]
-        dynamic[candidates] = True
-        return dynamic
+        selected[[i for i in order if not mandatory[i]][:budget]] = True
+        return mandatory | selected, selected
+
+    def _scores(self, frame: _Frame, nxt: GraphSnapshot | None) -> np.ndarray:
+        prev = self.prev
+        assert prev is not None and self.history is not None
+        nodes, w_t = frame.nodes, frame.adj
+        w_prev = reindex(prev.adj, prev.nodes, nodes)
+        name = self.cfg.scorer
+        if name == "eq14":
+            w_rows = [w_prev, w_t]
+            centres = [reindex(prev.centres, prev.nodes, nodes, rows=False), frame.centres]
+            if nxt is not None:
+                self.ahead = self._frame(nxt, frame)
+                w_rows.append(reindex(self.ahead.adj, self.ahead.nodes, nodes))
+                centres.append(reindex(self.ahead.centres, self.ahead.nodes, nodes, rows=False))
+            return eq14_scores(w_rows, centres, current=1)
+        if name == "random":
+            return self.rng.random(len(nodes))
+        one = sc.one_step(w_t, w_prev)
+        ewma = sc.ewma_score(w_t, reindex(self.history, prev.nodes, nodes))
+        if name == "one_step":
+            return one
+        if name == "ewma":
+            return ewma
+        prev_labels = np.array([self.labels.get(int(x), sc.UNKNOWN) for x in nodes])
+        profile = sc.community_profile(w_t, w_prev, prev_labels, prev.k)
+        if name == "profile":
+            return profile
+        return sc.combined([one, ewma, profile])
 
     def _factorise(self, frame: _Frame, dynamic: np.ndarray):
         """Landmark factorisation, then the separated factorisation of free rows."""
@@ -406,9 +447,32 @@ class DyGMFCore:
             "emb": dict(self.emb),
             "phi": dict(self.phi),
             "psi": dict(self.psi),
+            "labels": dict(self.labels),
+            "history": self.history,
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
         self.rng.bit_generator.state = state["rng"]
         self.r, self.prev, self.ahead = state["r"], state["prev"], state["ahead"]
         self.emb, self.phi, self.psi = dict(state["emb"]), dict(state["phi"]), dict(state["psi"])
+        self.labels, self.history = dict(state["labels"]), state["history"]
+
+
+class CausalDyGMF:
+    """DyG-MF that never sees t+1: an `OnlineClusterer` with a causal scorer.
+
+    With scorer "eq14" this is the paper's score with the t+1 terms dropped, as the
+    paper itself does at the final snapshot.
+    """
+
+    def __init__(self, config: DyGMFConfig, seed: int, k_schedule: dict[int, int] | None = None):
+        self.core = DyGMFCore(config, seed, k_schedule)
+
+    def step(self, snapshot: GraphSnapshot) -> StepResult:
+        return self.core.process(snapshot, None)
+
+    def get_state(self) -> dict[str, Any]:
+        return self.core.get_state()
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.core.set_state(state)
