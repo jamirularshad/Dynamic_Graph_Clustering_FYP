@@ -162,3 +162,30 @@ def test_deterministic_per_seed(data):
     assert run_dygmf(snapshots, ann).predictions == run_dygmf(snapshots, ann).predictions
     nmis = [pm.nmi(ann.labels[t], p) for t, p in run_dygmf(snapshots, ann).predictions.items()]
     assert all(0.0 <= v <= 1.0 for v in nmis)
+
+
+def test_selection_diagnostic_against_changed_nodes():
+    from dgc.methods.base import StepResult
+    from dgc.runner.run import _selection
+
+    before = {1: 0, 2: 0, 3: 1, 4: 1}
+    after = {1: 0, 2: 1, 3: 1, 4: 0}  # nodes 2 and 4 changed
+    result = StepResult(labels=after, updated_nodes=frozenset({2, 3}), selected=frozenset({2, 3}))
+    row = _selection(result, before, after)
+    assert (row["sel_precision"], row["sel_recall"], row["sel_f1"]) == (0.5, 0.5, 0.5)
+    assert _selection(StepResult(labels=after, updated_nodes=frozenset()), before, after) == {}
+
+
+def test_unknown_scorer_rejected():
+    with pytest.raises(ValueError):
+        D.DyGMFConfig(scorer="nope")
+
+
+@pytest.mark.parametrize("scorer", ["one_step", "ewma", "profile", "combined", "random"])
+def test_causal_scorers_select_exactly_the_budget(data, scorer):
+    snapshots, ann = data
+    core = D.DyGMFCore(D.DyGMFConfig(r=10, n_iter=10, k_max=8, scorer=scorer), seed=1)
+    core.process(snapshots[0], None)
+    result = core.process(snapshots[1], None)
+    assert len(result.selected) == math.ceil(0.16 * len(snapshots[1].nodes))
+    assert result.selected <= result.updated_nodes

@@ -6,6 +6,10 @@ Jaccard overlap of their involved node sets (union of `before` and `after`) is a
 least `min_overlap`. Matching is one-to-one and greedy: smallest delay first, then
 largest overlap. Precision is undefined (None) with no detections of a kind, recall
 with no planted events of a kind; F1 is None when either is.
+
+`mean_delay` counts snapshots between the planted and the detected event.
+`mean_operational_delay` instead uses when the detection was actually available
+(`available_at` of the detecting snapshot), so a lookahead method pays for waiting.
 """
 
 from dataclasses import dataclass
@@ -26,6 +30,7 @@ class KindScores:
     recall: float | None
     f1: float | None
     mean_delay: float | None
+    mean_operational_delay: float | None = None
 
 
 def involved_nodes(event: CommunityEvent) -> frozenset[int]:
@@ -38,8 +43,13 @@ def match_events(
     planted: list[CommunityEvent],
     tolerance: int,
     min_overlap: float,
+    available_at: dict[int, int] | None = None,
 ) -> list[KindScores]:
-    """Per-kind scores for the five tracked kinds. "complex" detections never match."""
+    """Per-kind scores for the five tracked kinds. "complex" detections never match.
+
+    `available_at` maps each snapshot t to when its output became available; when
+    omitted, outputs are taken to be available at t.
+    """
     return [
         _score_kind(
             kind,
@@ -47,12 +57,13 @@ def match_events(
             [e for e in planted if e.kind == kind],
             tolerance,
             min_overlap,
+            available_at or {},
         )
         for kind in EVENT_KINDS
     ]
 
 
-def _score_kind(kind, detected, planted, tolerance, min_overlap) -> KindScores:
+def _score_kind(kind, detected, planted, tolerance, min_overlap, available_at) -> KindScores:
     det_nodes = [involved_nodes(e) for e in detected]
     pl_nodes = [involved_nodes(e) for e in planted]
     candidates = []
@@ -67,13 +78,14 @@ def _score_kind(kind, detected, planted, tolerance, min_overlap) -> KindScores:
 
     used_d: set[int] = set()
     used_p: set[int] = set()
-    delays = []
+    delays, operational = [], []
     for delay, _, i, j in sorted(candidates):
         if i in used_d or j in used_p:
             continue
         used_d.add(i)
         used_p.add(j)
         delays.append(delay)
+        operational.append(available_at.get(detected[i].t, detected[i].t) - planted[j].t)
 
     tp = len(delays)
     precision = tp / len(detected) if detected else None
@@ -93,6 +105,7 @@ def _score_kind(kind, detected, planted, tolerance, min_overlap) -> KindScores:
         recall=recall,
         f1=f1,
         mean_delay=sum(delays) / tp if tp else None,
+        mean_operational_delay=sum(operational) / tp if tp else None,
     )
 
 

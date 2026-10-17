@@ -7,11 +7,17 @@ import pytest
 
 from dgc.data.synthetic import ScheduledEvent, SyntheticConfig, generate
 from dgc.data.types import EvalAnnotations
+from dgc.methods.dygmf import CausalDyGMF, DyGMFConfig
 from dgc.methods.louvain import LouvainBaseline
 from dgc.runner.run import run_sequence
 from dgc.tracking.tracker import Tracker
 
-METHODS = {"louvain": lambda: LouvainBaseline(seed=3)}
+DYGMF = dict(r=8, n_iter=15, k_max=6)
+METHODS = {
+    "louvain": lambda: LouvainBaseline(seed=3),
+    "dygmf_causal_eq14": lambda: CausalDyGMF(DyGMFConfig(**DYGMF, scorer="eq14"), seed=3),
+    "dygmf_causal_combined": lambda: CausalDyGMF(DyGMFConfig(**DYGMF, scorer="combined"), seed=3),
+}
 
 CONFIG = SyntheticConfig(
     n_communities=4,

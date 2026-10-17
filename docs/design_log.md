@@ -168,3 +168,62 @@ The birth/death benchmark (about 100k nodes and 2M edges per snapshot) is too la
 - **Selective updating saved time:** 10.1 s against 15.7 s for full updating, at equal NMI here.
 - **Contrast with the planted pilot (scratch, 2026-10-11).** On a small planted sequence with a merge and a birth, μ = 0.16 drifted (NMI from 1.00 to 0.60 over 6 snapshots), while μ = 1 tracked from-scratch runs. The Birth-Death subsample draws contain no events. This is preliminary evidence that frozen embeddings drift under structural events, which bears directly on RQ3 and E6. It is a 3-seed pilot, not a result.
 - **Checkpoint verdict (25 Oct gate, preliminary):** the reimplementation is label-free, fully specified (D1–D9 plus two measured revisions) and recovers easy structure. It is acceptable to build on, provided E1 is repeated on a harder setting before the final tables.
+
+## 2026-10-12: Week 3, causal estimators
+
+### Implementation
+- `methods/scores.py` holds pure causal scores over rows aligned to the current node index:
+  - `one_step`: ‖w_t − w_{t−1}‖²
+  - `ewma_score` / `ewma_update`: the history is updated only after step t's output exists
+  - `community_profile`: Jensen–Shannon divergence (base 2) between the node's neighbour distribution over the t−1 communities at t−1 and at t, with explicit "unknown neighbour" and "no neighbours" buckets
+  - `combined`: the mean of rank-normalised one-step, EWMA and profile scores
+  - `random`
+- `DyGMFConfig.scorer` selects the score. `CausalDyGMF` never receives t+1. With `scorer = eq14` it is the paper's score with the t+1 terms dropped, as the paper itself does at t = τ.
+- Selection diagnostic: `StepResult.selected` holds the score-chosen nodes, excluding mandatory ones. Per snapshot, precision, recall and F1 are computed against the nodes whose reference community changed between t−1 and t. This is a diagnostic only (report §5).
+- `KindScores.mean_operational_delay` measures delay from when an output became available (`available_at`), so the lookahead version pays for waiting for t+1.
+- Cancellation test (`tests/test_scores.py`): our original proposal's community-relative formula equals the one-step score exactly, and the corrected profile score differs on a hand-built example.
+- The runner accepts `--method`, `--param KEY=VALUE`, `--name` and `--clear-params` overrides, all recorded in the manifest. `scripts/run_e2_e3.sh` and `scripts/summarise_runs.py` rebuild the pilot tables from saved outputs.
+
+### Data and protocol
+- Data: `configs/e2e3_{gradual,abrupt}.yaml`, 10 planted communities × 40 nodes, 10 snapshots, p_in 0.25 and p_out 0.0068, so about 20% of each node's edges cross communities (the Green benchmarks' mixing parameter).
+  - Gradual: 5% of nodes move per step.
+  - Abrupt: merge at t3, split at t5, birth at t6, death at t8.
+- DyG-MF: oracle k (to isolate selection effects), r = 20, μ = 0.16.
+- Splits: validation seeds 101–103 for all choices; test seeds 1–3 for the reported pilot.
+- EWMA γ tuning (validation, mean NMI over both regimes): γ = 0.2 → 0.956, 0.5 → 0.950, 0.8 → 0.952. γ = 0.2 was chosen; the differences are within one standard deviation, so the choice is weak.
+
+### E2/E3 pilot (test seeds 1–3; `reports/e2e3_pilot.csv`)
+| Method | Gradual NMI | Abrupt NMI | Abrupt event F1 | Operational delay | Selection recall (gradual / abrupt) | Updated |
+|---|---|---|---|---|---|---|
+| Original (lookahead Eq. 14) | 0.886 ± 0.008 | 0.977 ± 0.009 | 0.67 | 1.25 | 0.19 / 0.21 | 36% |
+| Causal Eq. 14 (no t+1) | 0.912 ± 0.014 | 0.971 ± 0.010 | 0.49 | 0.44 | 0.42 / 0.03 | 35% |
+| Causal one-step | 0.915 ± 0.015 | 0.968 ± 0.016 | 0.72 | 0.17 | 0.52 / 0.45 | 35% |
+| Causal EWMA (γ = 0.2) | 0.928 ± 0.004 | 0.976 ± 0.012 | 0.60 | 0.11 | 0.54 / 0.44 | 35% |
+| Causal community profile | 0.991 ± 0.007 | 0.961 ± 0.018 | 0.67 | 0.08 | 1.00 / 0.53 | 36% |
+| Causal combined | 0.964 ± 0.010 | 0.979 ± 0.000 | 0.82 | 0.08 | 0.79 / 0.46 | 35% |
+| Random selection | 0.879 ± 0.008 | 0.951 ± 0.016 | 0.50 | 0.00 | 0.17 / 0.18 | 35% |
+| DyG-MF μ = 1 (all updated) | 0.995 ± 0.003 | 0.985 ± 0.009 | 0.69 | 0.08 | 1.00 / 1.00 | 100% |
+| Louvain per snapshot | 1.000 ± 0.000 | 0.995 ± 0.005 | 0.90 | 0.08 | — | 100% |
+
+### Preliminary findings (3 seeds; not yet results)
+1. **RQ1:** removing the lookahead did not reduce quality. Causal scores match or beat the original in both regimes, and operational delay drops from 1.25 to about 0.1 snapshots, because the lookahead output for t is only available at t+1.
+2. **The paper's Eq. 14 is a weak selector.** Its changed-node recall is close to random's in the gradual regime (0.19 vs 0.17); without t+1 it is near zero in the abrupt regime (0.03), selecting mostly nodes whose community did not change.
+3. **RQ2:**
+   - The corrected community-profile score dominates under gradual membership change: recall 1.00, and NMI 0.991 against 0.995 for updating everything, at about a third of the updates.
+   - It is weaker under abrupt events (0.961). Merges and splits change many nodes' neighbourhoods together, so the t−1 communities stop being a good reference.
+   - The combined score is the most even across regimes and best on event F1.
+4. **A framing risk for the thesis:** per-snapshot Louvain beats every DyG-MF variant on these planted graphs (0.995–1.000), in a fraction of the time. Planted partitions with clear modular structure favour modularity optimisation. Claims must be about *selection within an incremental factorisation method* (with μ = 1 as the reference), not that DyG-MF beats static baselines. The real-data runs (E8) will test whether the planted-graph advantage persists.
+5. **The realised update fraction is about 35% at μ = 0.16** for every scorer, because landmark re-selection frees extra rows. This confirms the Week 2 accounting finding.
+
+### Estimator selection (validation seeds 101–103; `reports/e3_validation_selection.csv`)
+| Scorer | Abrupt NMI | Gradual NMI | Mean |
+|---|---|---|---|
+| community profile | 0.960 | 0.995 | **0.978** |
+| combined | 0.973 | 0.955 | 0.964 |
+| EWMA (γ = 0.2) | 0.971 | 0.941 | 0.956 |
+| one-step | 0.971 | 0.915 | 0.943 |
+| Eq. 14 (no t+1) | 0.969 | 0.915 | 0.942 |
+
+- **Decision:** the community-profile score is frozen as the estimator for the allocation experiments (E4, E5), using the selection rule fixed beforehand (mean validation NMI across both regimes). The ranking matches the test pilot, so the choice is not seed-specific.
+- **Known weakness, carried forward:** profile is the weakest scorer under abrupt events. The combined score stays the fallback if E4's abrupt regimes show this matters.
+- **Timing caveat:** the validation and test grids ran while the machine was heavily loaded (load average about 10; the validation grid got 29% CPU and took 21 min). Wall-clock times from these pilots are unreliable and must not be used for efficiency claims. E5 timings will be measured on a quiet machine with thread settings pinned.

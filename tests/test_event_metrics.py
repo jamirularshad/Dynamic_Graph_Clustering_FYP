@@ -19,6 +19,17 @@ def test_exact_match():
     assert (s.precision, s.recall, s.f1, s.mean_delay) == (1.0, 1.0, 1.0, 0.0)
 
 
+def test_operational_delay_uses_availability_time():
+    planted = CommunityEvent(3, "death", before=(A,))
+    detected = CommunityEvent(3, "death", before=(A,))
+    (s,) = [
+        s
+        for s in match_events([detected], [planted], 1, 0.5, available_at={3: 4})
+        if s.kind == "death"
+    ]
+    assert s.mean_delay == 0.0 and s.mean_operational_delay == 1.0
+
+
 def test_late_detection_within_tolerance_records_delay():
     planted = CommunityEvent(3, "death", before=(A,))
     detected = CommunityEvent(4, "death", before=(A,))

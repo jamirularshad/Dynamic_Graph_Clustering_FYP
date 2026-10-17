@@ -10,12 +10,12 @@ from dgc.data.loaders import load_birthdeath
 from dgc.data.synthetic import ScheduledEvent, SyntheticConfig, generate
 from dgc.data.types import EvalAnnotations, GraphSnapshot
 from dgc.methods.base import OnlineClusterer
-from dgc.methods.dygmf import DyGMFConfig, DyGMFCore
+from dgc.methods.dygmf import CausalDyGMF, DyGMFConfig, DyGMFCore
 from dgc.methods.lookahead import LookaheadAdapter
 from dgc.methods.louvain import LouvainBaseline
 from dgc.runner.manifest import REPO_ROOT
 
-METHODS = ("louvain", "dygmf_lookahead")
+METHODS = ("louvain", "dygmf_lookahead", "dygmf_causal")
 
 
 @dataclass(frozen=True)
@@ -63,9 +63,14 @@ def load_config(path: Path) -> RunConfig:
         raw["data"] = BirthDeathConfig(**data)
     else:
         raise ValueError(f"unknown data source {source!r}")
-    if raw["method"] not in METHODS:
-        raise ValueError(f"unknown method {raw['method']!r}; known: {list(METHODS)}")
-    return RunConfig(**raw)
+    config = RunConfig(**raw)
+    validate(config)
+    return config
+
+
+def validate(config: RunConfig) -> None:
+    if config.method not in METHODS:
+        raise ValueError(f"unknown method {config.method!r}; known: {list(METHODS)}")
 
 
 def build_data(config: RunConfig) -> tuple[list[GraphSnapshot], EvalAnnotations]:
@@ -93,5 +98,7 @@ def build_method(
         if k_mode == "oracle"
         else None
     )
-    core = DyGMFCore(DyGMFConfig(**params), seed=config.algo_seed, k_schedule=k_schedule)
-    return LookaheadAdapter(core)
+    dygmf_config = DyGMFConfig(**params)
+    if config.method == "dygmf_causal":
+        return CausalDyGMF(dygmf_config, seed=config.algo_seed, k_schedule=k_schedule)
+    return LookaheadAdapter(DyGMFCore(dygmf_config, seed=config.algo_seed, k_schedule=k_schedule))

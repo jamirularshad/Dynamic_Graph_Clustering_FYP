@@ -1,0 +1,28 @@
+# E2/E3 pilot data, abrupt regime: 10 planted communities x 40 nodes, 10 snapshots,
+# p_in 0.25 and p_out 0.0068 so ~20% of each node's edges cross communities (the
+# Green benchmarks' mixing parameter). Method and scorer are set from the command
+# line by scripts/run_e2_e3.sh; k_mode oracle isolates the effect of node selection.
+name: e2e3_abrupt
+method: dygmf_causal
+graph_seed: 1
+algo_seed: 1
+tracker_threshold: 0.3
+event_tolerance: 1
+event_min_overlap: 0.5
+method_params:
+  k_mode: oracle
+  r: 20
+  mu: 0.16
+  n_iter: 100
+data:
+  n_communities: 10
+  community_size: 40
+  n_snapshots: 10
+  p_in: 0.25
+  p_out: 0.0068
+  move_fraction: 0.0
+  events:
+    - {t: 3, kind: merge}
+    - {t: 5, kind: split}
+    - {t: 6, kind: birth}
+    - {t: 8, kind: death}
